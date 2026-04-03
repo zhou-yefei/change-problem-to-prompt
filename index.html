@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>摩擦审计 - 找到消耗你时间的事，让 AI 帮你解决</title>
+  <meta name="description" content="记录日常工作中的摩擦点，AI 自动诊断分析并生成解决方案。每周总结帮你持续优化效率。" />
+  <meta property="og:title" content="摩擦审计 ⚡" />
+  <meta property="og:description" content="找到消耗你时间的事，让 AI 帮你解决" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@400;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #1a1714; color: #e8e4df; font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; -webkit-font-smoothing: antialiased; }
+    textarea:focus, input:focus, button:focus { outline: none; }
+    ::selection { background: rgba(255,107,74,0.3); }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
+    @keyframes slideUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes bounce { 0%, 60%, 100% { transform: translateY(0); } 30% { transform: translateY(-6px); } }
+    @keyframes pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+    /* API Key Modal */
+    .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 1000; animation: fadeIn 0.2s ease-out; }
+    .modal-box { background: #252220; border: 1px solid rgba(255,255,255,0.1); border-radius: 18px; padding: 32px; max-width: 440px; width: 90%; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.5/babel.min.js"></script>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    const PHASES = { CAPTURE: "capture", ANALYZE: "analyze", BUILD: "build", WEEKLY: "weekly" };
+    const STORAGE_KEY = "friction-audit-data";
+    const API_KEY_STORAGE = "friction-audit-api-key";
+
+    // ─── Utilities ───
+    function getWeekId(date = new Date()) {
+      const d = new Date(date);
+      d.setHours(0, 0, 0, 0);
+      d.setDate(d.getDate() + 3 - ((d.getDay() + 6) % 7));
+      const week1 = new Date(d.getFullYear(), 0, 4);
+      return d.getFullYear() + "-W" + String(1 + Math.round(((d - week1) / 86400000 - 3 + ((week1.getDay() + 6) % 7)) / 7)).padStart(2, "0");
+    }
+    function getWeekLabel(weekId) { const [y, w] = weekId.split("-W"); return y + "年 第" + parseInt(w) + "周"; }
+    function parseMinutes(t) { if (t.includes("2小时")) return 120; if (t.includes("1小时")) return 60; if (t.includes("30")) return 30; if (t.includes("10")) return 10; return 30; }
+    function freqMul(f) { if (f === "每天") return 7; if (f === "每周几次") return 3; if (f === "每周一次") return 1; return 0.75; }
+
+    // ─── API helper ───
+    async function callClaude(apiKey, messages, system) {
+      const body = { model: "claude-sonnet-4-20250514", max_tokens: 1000, messages };
+      if (system) body.system = system;
+      const resp = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) { const err = await resp.text(); throw new Error("API error: " + resp.status + " " + err); }
+      const data = await resp.json();
+      return data.content.filter(c => c.type === "text").map(c => c.text).join("");
+    }
+
+    // ─── API Key Modal ───
+    function ApiKeyModal({ onSave }) {
+      const [key, setKey] = useState("");
+      return (
+        <div className="modal-overlay">
+          <div className="modal-box">
+            <div style={{ fontSize: 28, marginBottom: 16 }}>🔑</div>
+            <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 8, fontFamily: "'Source Serif 4', Georgia, serif" }}>输入你的 API Key</h2>
+            <p style={{ fontSize: 13, color: "rgba(255,255,255,0.45)", lineHeight: 1.6, marginBottom: 20 }}>
+              本应用需要 Anthropic API Key 来运行 AI 分析。<br />
+              Key 仅保存在你的浏览器本地，不会发送到任何第三方服务器。<br />
+              <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener" style={{ color: "#ff8f6b", textDecoration: "none" }}>→ 去 Anthropic 获取 API Key</a>
+            </p>
+            <input
+              value={key} onChange={e => setKey(e.target.value)}
+              placeholder="sk-ant-api03-..."
+              type="password"
+              style={{ width: "100%", padding: "14px 16px", background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.15)", borderRadius: 10, color: "#e8e4df", fontSize: 14, marginBottom: 16, fontFamily: "monospace" }}
+              onKeyDown={e => { if (e.key === "Enter" && key.trim()) onSave(key.trim()); }}
+            />
+            <button
+              onClick={() => { if (key.trim()) onSave(key.trim()); }}
+              disabled={!key.trim()}
+              style={{ width: "100%", padding: "14px 0", background: key.trim() ? "linear-gradient(135deg, #ff6b4a, #e85d3a)" : "rgba(255,255,255,0.05)", border: "none", borderRadius: 10, color: key.trim() ? "#fff" : "rgba(255,255,255,0.2)", fontSize: 14, fontWeight: 600, cursor: key.trim() ? "pointer" : "default" }}
+            >保存并开始使用</button>
+          </div>
+        </div>
+      );
+    }
+
+    // ─── Components ───
+    function FrictionEntry({ entry, index, onDelete, compact }) {
+      return (
+        <div style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: compact ? 10 : 14, padding: compact ? "10px 14px" : "16px 20px", display: "flex", gap: compact ? 10 : 14, alignItems: "flex-start", animation: "slideUp 0.4s ease-out" }}>
+          <div style={{ width: compact ? 22 : 28, height: compact ? 22 : 28, borderRadius: compact ? 6 : 8, background: "linear-gradient(135deg, #ff6b4a, #ff8f6b)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: compact ? 11 : 13, fontWeight: 700, color: "#fff", flexShrink: 0, marginTop: 2 }}>{index + 1}</div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: compact ? 13 : 15, color: "#e8e4df", lineHeight: 1.55, fontFamily: "'Source Serif 4', Georgia, serif" }}>{entry.text}</div>
+            <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 20, background: "rgba(255,107,74,0.15)", color: "#ff8f6b", fontWeight: 600 }}>{entry.frequency}</span>
+              <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 20, background: "rgba(107,168,255,0.15)", color: "#7db4ff", fontWeight: 600 }}>~{entry.timeSpent}</span>
+            </div>
+          </div>
+          {onDelete && <button onClick={() => onDelete(index)} style={{ background: "none", border: "none", color: "rgba(255,255,255,0.2)", cursor: "pointer", fontSize: 16, padding: "2px 6px", borderRadius: 6, flexShrink: 0 }} onMouseOver={e => { e.target.style.color = "#ff6b4a"; }} onMouseOut={e => { e.target.style.color = "rgba(255,255,255,0.2)"; }}>×</button>}
+        </div>
+      );
+    }
+
+    function AnalysisCard({ item, index, onBuild }) {
+      const pc = { high: { bg: "rgba(255,107,74,0.12)", text: "#ff8f6b", label: "高优先" }, medium: { bg: "rgba(255,199,107,0.12)", text: "#ffc76b", label: "中优先" }, low: { bg: "rgba(107,168,255,0.12)", text: "#7db4ff", label: "可选" } };
+      const p = pc[item.priority] || pc.medium;
+      return (
+        <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 16, padding: 24, animation: "slideUp 0.5s ease-out " + (index * 0.12) + "s both" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", color: "rgba(255,255,255,0.35)" }}>摩擦点 #{index + 1}</div>
+            <span style={{ fontSize: 11, padding: "3px 10px", borderRadius: 20, background: p.bg, color: p.text, fontWeight: 600 }}>{p.label}</span>
+          </div>
+          <h3 style={{ fontSize: 18, fontWeight: 700, color: "#e8e4df", margin: "0 0 8px 0", fontFamily: "'Source Serif 4', Georgia, serif" }}>{item.title}</h3>
+          <p style={{ fontSize: 14, color: "rgba(255,255,255,0.5)", lineHeight: 1.6, margin: "0 0 16px 0" }}>{item.diagnosis}</p>
+          <div style={{ background: "rgba(255,255,255,0.04)", borderRadius: 10, padding: 14, marginBottom: 16 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", color: "#ff8f6b", marginBottom: 8 }}>建议方案</div>
+            <div style={{ fontSize: 14, color: "#e8e4df", lineHeight: 1.6, fontFamily: "'Source Serif 4', Georgia, serif" }}>{item.solution}</div>
+          </div>
+          <div style={{ display: "flex", gap: 12, fontSize: 12, color: "rgba(255,255,255,0.35)", marginBottom: 16 }}>
+            <span>⏱ 预计节省: {item.timeSaved}</span><span>·</span><span>难度: {item.difficulty}</span>
+          </div>
+          <button onClick={() => onBuild(item)} style={{ width: "100%", padding: "12px 0", background: "linear-gradient(135deg, #ff6b4a, #e85d3a)", border: "none", borderRadius: 10, color: "#fff", fontSize: 14, fontWeight: 600, cursor: "pointer", transition: "all 0.25s" }}
+            onMouseOver={e => { e.target.style.transform = "translateY(-1px)"; e.target.style.boxShadow = "0 4px 20px rgba(255,107,74,0.3)"; }}
+            onMouseOut={e => { e.target.style.transform = "translateY(0)"; e.target.style.boxShadow = "none"; }}
+          >🛠 让 AI 帮我构建 →</button>
+        </div>
+      );
+    }
+
+    function TypingDots() {
+      return (<div style={{ display: "flex", gap: 4, padding: "8px 0" }}>{[0,1,2].map(i => <div key={i} style={{ width: 6, height: 6, borderRadius: "50%", background: "#ff8f6b", animation: "bounce 1.2s ease-in-out " + (i * 0.15) + "s infinite" }} />)}</div>);
+    }
+
+    function ChatMessage({ msg }) {
+      const u = msg.role === "user";
+      return (<div style={{ display: "flex", justifyContent: u ? "flex-end" : "flex-start", marginBottom: 12, animation: "slideUp 0.3s ease-out" }}><div style={{ maxWidth: "85%", padding: "12px 16px", borderRadius: u ? "16px 16px 4px 16px" : "16px 16px 16px 4px", background: u ? "linear-gradient(135deg, #ff6b4a, #e85d3a)" : "rgba(255,255,255,0.06)", color: u ? "#fff" : "#e8e4df", fontSize: 14, lineHeight: 1.6, fontFamily: "'Source Serif 4', Georgia, serif", whiteSpace: "pre-wrap" }}>{msg.content}</div></div>);
+    }
+
+    function StatCard({ icon, label, value, sub, color, delay = 0 }) {
+      return (<div style={{ flex: 1, minWidth: 130, background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 14, padding: "18px 16px", animation: "slideUp 0.5s ease-out " + delay + "s both" }}>
+        <div style={{ fontSize: 20, marginBottom: 8 }}>{icon}</div>
+        <div style={{ fontSize: 24, fontWeight: 700, color: color || "#e8e4df", fontFamily: "'Source Serif 4', Georgia, serif", lineHeight: 1 }}>{value}</div>
+        <div style={{ fontSize: 12, color: "rgba(255,255,255,0.4)", marginTop: 6, fontWeight: 600 }}>{label}</div>
+        {sub && <div style={{ fontSize: 11, color: "rgba(255,255,255,0.25)", marginTop: 4 }}>{sub}</div>}
+      </div>);
+    }
+
+    function WeeklyBarChart({ weeks }) {
+      if (!weeks.length) return null;
+      const mx = Math.max(...weeks.map(w => w.count), 1);
+      return (<div style={{ display: "flex", alignItems: "flex-end", gap: 6, height: 80, padding: "0 4px" }}>
+        {weeks.map((w, i) => (<div key={w.id} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 6, animation: "slideUp 0.4s ease-out " + (i * 0.08) + "s both" }}>
+          <div style={{ fontSize: 10, color: "rgba(255,255,255,0.35)", fontWeight: 600 }}>{w.count}</div>
+          <div style={{ width: "100%", maxWidth: 36, height: Math.max(4, (w.count / mx) * 56), borderRadius: 4, background: i === weeks.length - 1 ? "linear-gradient(180deg, #ff6b4a, #e85d3a)" : "rgba(255,255,255,0.1)" }} />
+          <div style={{ fontSize: 9, color: "rgba(255,255,255,0.3)", fontWeight: 600 }}>{w.label}</div>
+        </div>))}
+      </div>);
+    }
+
+    // ─── Weekly Summary ───
+    function WeeklySummary({ allWeeks, currentWeekId, onBack, apiKey }) {
+      const [selectedWeek, setSelectedWeek] = useState(currentWeekId);
+      const [insight, setInsight] = useState("");
+      const [loading, setLoading] = useState(false);
+
+      const wd = allWeeks[selectedWeek] || { entries: [], analyses: [] };
+      const weekIds = Object.keys(allWeeks).sort();
+      const total = wd.entries.length;
+      const mins = wd.entries.reduce((s, e) => s + parseMinutes(e.timeSpent) * freqMul(e.frequency), 0);
+      const resolved = (wd.analyses || []).length;
+      const top = wd.entries.length > 0 ? wd.entries.reduce((b, e) => { const sc = parseMinutes(e.timeSpent) * freqMul(e.frequency); return sc > b.score ? { text: e.text, score: sc } : b; }, { text: "", score: 0 }) : null;
+      const chart = weekIds.slice(-6).map(id => ({ id, label: "W" + id.split("-W")[1], count: allWeeks[id].entries.length }));
+      const allEntries = Object.values(allWeeks).reduce((s, w) => s + w.entries.length, 0);
+      const allMins = Object.values(allWeeks).reduce((s, w) => s + w.entries.reduce((ss, e) => ss + parseMinutes(e.timeSpent) * freqMul(e.frequency), 0), 0);
+
+      const gen = async () => {
+        if (!wd.entries.length) return;
+        setLoading(true); setInsight("");
+        const es = wd.entries.map((e, i) => (i + 1) + '. "' + e.text + '" (' + e.frequency + ", " + e.timeSpent + ")").join("\n");
+        const prev = weekIds[weekIds.indexOf(selectedWeek) - 1];
+        const ps = prev ? "上周记录了" + allWeeks[prev].entries.length + "个摩擦点。" : "没有上周数据。";
+        try {
+          const r = await callClaude(apiKey, [{ role: "user", content: "你是效率教练。分析本周摩擦记录写150字以内周总结。\n\n本周:\n" + es + "\n统计:" + total + "个点,周耗时" + Math.round(mins) + "分钟,已分析" + resolved + "个\n" + ps + "\n\n要求:1.指出最大时间黑洞 2.给一个本周能行动的建议 3.有上周数据就对比 4.语气犀利直接。纯文本。" }]);
+          setInsight(r);
+        } catch { setInsight("生成失败，请检查 API Key 后重试。"); }
+        setLoading(false);
+      };
+
+      return (<div style={{ animation: "fadeIn 0.4s ease-out" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
+          <h2 style={{ fontSize: 18, fontWeight: 700, margin: 0, fontFamily: "'Source Serif 4', Georgia, serif" }}>每周总结</h2>
+          <button onClick={onBack} style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, color: "rgba(255,255,255,0.5)", fontSize: 12, fontWeight: 600, padding: "6px 14px", cursor: "pointer" }} onMouseOver={e => e.target.style.color = "#e8e4df"} onMouseOut={e => e.target.style.color = "rgba(255,255,255,0.5)"}>← 返回记录</button>
+        </div>
+
+        <div style={{ background: "linear-gradient(135deg, rgba(255,107,74,0.08), rgba(255,199,107,0.06))", border: "1px solid rgba(255,107,74,0.15)", borderRadius: 14, padding: "16px 18px", marginBottom: 20, display: "flex", justifyContent: "space-around", animation: "slideUp 0.4s ease-out" }}>
+          <div style={{ textAlign: "center" }}><div style={{ fontSize: 22, fontWeight: 700, color: "#ff8f6b", fontFamily: "'Source Serif 4', Georgia, serif" }}>{allEntries}</div><div style={{ fontSize: 11, color: "rgba(255,255,255,0.4)", fontWeight: 600, marginTop: 2 }}>累计摩擦点</div></div>
+          <div style={{ width: 1, background: "rgba(255,255,255,0.08)" }} />
+          <div style={{ textAlign: "center" }}><div style={{ fontSize: 22, fontWeight: 700, color: "#ffc76b", fontFamily: "'Source Serif 4', Georgia, serif" }}>{(allMins / 60).toFixed(1)}h</div><div style={{ fontSize: 11, color: "rgba(255,255,255,0.4)", fontWeight: 600, marginTop: 2 }}>累计耗时</div></div>
+          <div style={{ width: 1, background: "rgba(255,255,255,0.08)" }} />
+          <div style={{ textAlign: "center" }}><div style={{ fontSize: 22, fontWeight: 700, color: "#6bdfb8", fontFamily: "'Source Serif 4', Georgia, serif" }}>{weekIds.length}</div><div style={{ fontSize: 11, color: "rgba(255,255,255,0.4)", fontWeight: 600, marginTop: 2 }}>记录周数</div></div>
+        </div>
+
+        {weekIds.length > 1 && <div style={{ display: "flex", gap: 6, marginBottom: 20, flexWrap: "wrap" }}>
+          {weekIds.map(id => <button key={id} onClick={() => { setSelectedWeek(id); setInsight(""); }} style={{ padding: "7px 14px", borderRadius: 20, border: selectedWeek === id ? "1px solid #ff6b4a" : "1px solid rgba(255,255,255,0.1)", background: selectedWeek === id ? "rgba(255,107,74,0.15)" : "transparent", color: selectedWeek === id ? "#ff8f6b" : "rgba(255,255,255,0.4)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>{getWeekLabel(id)} <span style={{ opacity: 0.5 }}>({allWeeks[id].entries.length})</span></button>)}
+        </div>}
+
+        <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
+          <StatCard icon="🔥" label="本周摩擦点" value={total} color="#ff8f6b" />
+          <StatCard icon="⏱" label="本周耗时" value={Math.round(mins) + "m"} sub={"≈ " + (mins / 60).toFixed(1) + " 小时"} color="#ffc76b" delay={0.08} />
+          <StatCard icon="✅" label="已分析" value={resolved} color="#6bdfb8" delay={0.16} />
+        </div>
+
+        {chart.length > 1 && <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 14, padding: "18px 16px", marginBottom: 20 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", color: "rgba(255,255,255,0.35)", marginBottom: 14 }}>摩擦趋势</div>
+          <WeeklyBarChart weeks={chart} />
+        </div>}
+
+        {top && <div style={{ background: "rgba(255,107,74,0.06)", border: "1px solid rgba(255,107,74,0.15)", borderRadius: 14, padding: 18, marginBottom: 20, animation: "slideUp 0.5s ease-out 0.2s both" }}>
+          <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", color: "#ff8f6b", marginBottom: 8 }}>🚨 最大时间黑洞</div>
+          <div style={{ fontSize: 15, color: "#e8e4df", lineHeight: 1.5, fontFamily: "'Source Serif 4', Georgia, serif" }}>{top.text.length > 80 ? top.text.slice(0, 80) + "…" : top.text}</div>
+          <div style={{ fontSize: 12, color: "rgba(255,255,255,0.3)", marginTop: 8 }}>每周约消耗 {Math.round(top.score)} 分钟</div>
+        </div>}
+
+        <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 14, padding: 20, marginBottom: 24 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", color: "rgba(255,255,255,0.35)" }}>✨ AI 周报洞察</div>
+            <button onClick={gen} disabled={loading || !wd.entries.length} style={{ padding: "6px 16px", borderRadius: 20, border: "none", background: wd.entries.length > 0 ? "linear-gradient(135deg, #ff6b4a, #e85d3a)" : "rgba(255,255,255,0.05)", color: wd.entries.length > 0 ? "#fff" : "rgba(255,255,255,0.2)", fontSize: 12, fontWeight: 600, cursor: wd.entries.length > 0 ? "pointer" : "default" }}>{loading ? "生成中..." : insight ? "重新生成" : "生成洞察"}</button>
+          </div>
+          {loading && <TypingDots />}
+          {insight && !loading && <div style={{ fontSize: 14, color: "#e8e4df", lineHeight: 1.7, fontFamily: "'Source Serif 4', Georgia, serif", animation: "fadeIn 0.4s ease-out", whiteSpace: "pre-wrap" }}>{insight}</div>}
+          {!insight && !loading && <div style={{ fontSize: 13, color: "rgba(255,255,255,0.2)", lineHeight: 1.6 }}>{wd.entries.length > 0 ? "点击「生成洞察」，AI 会分析你本周的摩擦模式并给出建议" : "本周还没有记录，先去添加摩擦点吧"}</div>}
+        </div>
+
+        {wd.entries.length > 0 && <div>
+          <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", color: "rgba(255,255,255,0.35)", marginBottom: 12 }}>本周记录明细</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>{wd.entries.map((e, i) => <FrictionEntry key={i} entry={e} index={i} compact />)}</div>
+        </div>}
+      </div>);
+    }
+
+    // ─── Main App ───
+    function App() {
+      const [apiKey, setApiKey] = useState(() => {
+        try { return localStorage.getItem(API_KEY_STORAGE) || ""; } catch { return ""; }
+      });
+      const [showKeyModal, setShowKeyModal] = useState(!apiKey);
+      const [phase, setPhase] = useState(PHASES.CAPTURE);
+      const [entries, setEntries] = useState([]);
+      const [text, setText] = useState("");
+      const [frequency, setFrequency] = useState("每天");
+      const [timeSpent, setTimeSpent] = useState("30分钟");
+      const [analyzing, setAnalyzing] = useState(false);
+      const [analysisResults, setAnalysisResults] = useState([]);
+      const [buildItem, setBuildItem] = useState(null);
+      const [chatMessages, setChatMessages] = useState([]);
+      const [chatInput, setChatInput] = useState("");
+      const [chatLoading, setChatLoading] = useState(false);
+      const [allWeeks, setAllWeeks] = useState({});
+      const [loaded, setLoaded] = useState(false);
+      const chatEndRef = useRef(null);
+      const inputRef = useRef(null);
+      const currentWeekId = getWeekId();
+
+      // Load data
+      useEffect(() => {
+        try {
+          const raw = localStorage.getItem(STORAGE_KEY);
+          if (raw) { const d = JSON.parse(raw); setAllWeeks(d.allWeeks || {}); if (d.allWeeks?.[currentWeekId]?.entries) setEntries(d.allWeeks[currentWeekId].entries); }
+        } catch {}
+        setLoaded(true);
+      }, []);
+
+      const save = useCallback((w) => {
+        try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ allWeeks: w, lastUpdated: new Date().toISOString() })); } catch {}
+      }, []);
+
+      useEffect(() => { if (!loaded) return; const u = { ...allWeeks, [currentWeekId]: { ...allWeeks[currentWeekId], entries, analyses: allWeeks[currentWeekId]?.analyses || [] } }; setAllWeeks(u); save(u); }, [entries, loaded]);
+      useEffect(() => { if (!loaded || !analysisResults.length) return; const u = { ...allWeeks, [currentWeekId]: { ...allWeeks[currentWeekId], entries, analyses: analysisResults } }; setAllWeeks(u); save(u); }, [analysisResults, loaded]);
+      useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [chatMessages, chatLoading]);
+
+      const saveApiKey = (k) => { setApiKey(k); try { localStorage.setItem(API_KEY_STORAGE, k); } catch {} setShowKeyModal(false); };
+      const addEntry = () => { if (!text.trim()) return; setEntries([...entries, { text: text.trim(), frequency, timeSpent, date: new Date().toISOString() }]); setText(""); setTimeout(() => inputRef.current?.focus(), 100); };
+      const deleteEntry = (i) => setEntries(entries.filter((_, idx) => idx !== i));
+
+      const runAnalysis = async () => {
+        if (!entries.length) return;
+        setAnalyzing(true); setPhase(PHASES.ANALYZE);
+        const prompt = '你是效率优化专家。分析以下摩擦点并给出AI解决方案。\n\n' + entries.map((e, i) => (i+1) + '. "' + e.text + '" - ' + e.frequency + ', ' + e.timeSpent).join("\n") + '\n\n严格返回JSON数组，无其他文字:\n[{"title":"5-8字标题","diagnosis":"30-50字诊断","solution":"50-80字方案","priority":"high/medium/low","timeSaved":"节省时间","difficulty":"简单/中等/较复杂","buildPrompt":"100字以内prompt"}]';
+        try {
+          const r = await callClaude(apiKey, [{ role: "user", content: prompt }]);
+          setAnalysisResults(JSON.parse(r.replace(/```json|```/g, "").trim()));
+        } catch(e) {
+          if (e.message.includes("401")) { setShowKeyModal(true); setPhase(PHASES.CAPTURE); }
+          else setAnalysisResults([{ title: "分析出错", diagnosis: e.message, solution: "请重试", priority: "medium", timeSaved: "-", difficulty: "-", buildPrompt: "" }]);
+        }
+        setAnalyzing(false);
+      };
+
+      const startBuild = (item) => {
+        setBuildItem(item); setPhase(PHASES.BUILD);
+        setChatMessages([{ role: "assistant", content: "好的，让我们来解决「" + item.title + "」这个问题。\n\n我的建议方案是：" + item.solution + "\n\n我可以帮你：\n• 直接生成一个可用的工具/模板\n• 细化方案，讨论具体怎么做\n• 写一个你可以反复使用的 prompt\n\n你想从哪里开始？" }]);
+      };
+
+      const sendChat = async () => {
+        if (!chatInput.trim() || chatLoading) return;
+        const msg = chatInput.trim(); setChatInput("");
+        setChatMessages(p => [...p, { role: "user", content: msg }]); setChatLoading(true);
+        const sys = "你是AI效率助手，帮用户解决摩擦点。\n摩擦点:" + buildItem.title + "\n诊断:" + buildItem.diagnosis + "\n方案:" + buildItem.solution + "\n要具体可执行，不超200字，中文。";
+        const hist = chatMessages.map(m => ({ role: m.role, content: m.content }));
+        try {
+          const r = await callClaude(apiKey, [...hist, { role: "user", content: msg }], sys);
+          setChatMessages(p => [...p, { role: "assistant", content: r }]);
+        } catch { setChatMessages(p => [...p, { role: "assistant", content: "出了点问题，请重试。" }]); }
+        setChatLoading(false);
+      };
+
+      const freqOpts = ["每天", "每周几次", "每周一次", "每月几次"];
+      const timeOpts = ["10分钟", "30分钟", "1小时", "2小时+"];
+      const hasData = Object.keys(allWeeks).some(k => allWeeks[k].entries?.length > 0);
+
+      return (<div style={{ minHeight: "100vh" }}>
+        {showKeyModal && <ApiKeyModal onSave={saveApiKey} />}
+
+        {/* Header */}
+        <div style={{ padding: "28px 24px 0", maxWidth: 640, margin: "0 auto" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ width: 36, height: 36, borderRadius: 10, background: "linear-gradient(135deg, #ff6b4a, #e85d3a)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>⚡</div>
+              <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0, fontFamily: "'Source Serif 4', Georgia, serif", letterSpacing: -0.3 }}>摩擦审计</h1>
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              {hasData && phase !== PHASES.WEEKLY && <button onClick={() => setPhase(PHASES.WEEKLY)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 16px", borderRadius: 20, border: "1px solid rgba(255,199,107,0.3)", background: "rgba(255,199,107,0.08)", color: "#ffc76b", fontSize: 12, fontWeight: 600, cursor: "pointer" }} onMouseOver={e => { e.currentTarget.style.background = "rgba(255,199,107,0.15)"; }} onMouseOut={e => { e.currentTarget.style.background = "rgba(255,199,107,0.08)"; }}>📊 每周总结</button>}
+              <button onClick={() => setShowKeyModal(true)} style={{ padding: "8px 12px", borderRadius: 20, border: "1px solid rgba(255,255,255,0.1)", background: "transparent", color: "rgba(255,255,255,0.3)", fontSize: 12, cursor: "pointer" }} title="设置 API Key">🔑</button>
+            </div>
+          </div>
+          <p style={{ fontSize: 14, color: "rgba(255,255,255,0.4)", margin: "0 0 24px 0", lineHeight: 1.5 }}>找到消耗你时间的事，让 AI 帮你解决</p>
+
+          {phase !== PHASES.WEEKLY && <div style={{ display: "flex", gap: 4, marginBottom: 28 }}>
+            {[{ key: PHASES.CAPTURE, label: "记录摩擦", num: "1" }, { key: PHASES.ANALYZE, label: "诊断分析", num: "2" }, { key: PHASES.BUILD, label: "构建方案", num: "3" }].map(step => {
+              const active = step.key === phase;
+              const past = (step.key === PHASES.CAPTURE && (phase === PHASES.ANALYZE || phase === PHASES.BUILD)) || (step.key === PHASES.ANALYZE && phase === PHASES.BUILD);
+              return (<div key={step.key} style={{ flex: 1, display: "flex", flexDirection: "column", gap: 8 }}>
+                <div style={{ height: 3, borderRadius: 2, background: active || past ? "linear-gradient(90deg, #ff6b4a, #ff8f6b)" : "rgba(255,255,255,0.08)", transition: "all 0.5s" }} />
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span style={{ fontSize: 10, fontWeight: 700, color: active ? "#ff8f6b" : past ? "rgba(255,143,107,0.5)" : "rgba(255,255,255,0.2)" }}>{step.num}</span>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: active ? "#e8e4df" : past ? "rgba(255,255,255,0.35)" : "rgba(255,255,255,0.2)" }}>{step.label}</span>
+                </div>
+              </div>);
+            })}
+          </div>}
+        </div>
+
+        {/* Content */}
+        <div style={{ maxWidth: 640, margin: "0 auto", padding: "0 24px 100px" }}>
+
+          {phase === PHASES.WEEKLY && <WeeklySummary allWeeks={allWeeks} currentWeekId={currentWeekId} onBack={() => setPhase(PHASES.CAPTURE)} apiKey={apiKey} />}
+
+          {phase === PHASES.CAPTURE && <div style={{ animation: "fadeIn 0.4s ease-out" }}>
+            <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 16, padding: 24, marginBottom: 24 }}>
+              <textarea ref={inputRef} value={text} onChange={e => setText(e.target.value)} placeholder={"什么事让你觉得烦、重复、低效？\n\n例如：每周都要从三个不同的表格里手动汇总数据…"} onKeyDown={e => { if (e.key === "Enter" && e.metaKey) addEntry(); }} style={{ width: "100%", minHeight: 100, background: "transparent", border: "none", color: "#e8e4df", fontSize: 15, lineHeight: 1.6, resize: "vertical", fontFamily: "'Source Serif 4', Georgia, serif" }} />
+              <div style={{ display: "flex", gap: 12, marginTop: 16, flexWrap: "wrap", alignItems: "center" }}>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{freqOpts.map(f => <button key={f} onClick={() => setFrequency(f)} style={{ padding: "6px 14px", borderRadius: 20, border: frequency === f ? "1px solid #ff6b4a" : "1px solid rgba(255,255,255,0.1)", background: frequency === f ? "rgba(255,107,74,0.15)" : "transparent", color: frequency === f ? "#ff8f6b" : "rgba(255,255,255,0.4)", fontSize: 12, fontWeight: 600, cursor: "pointer", transition: "all 0.2s" }}>{f}</button>)}</div>
+                <div style={{ width: 1, height: 20, background: "rgba(255,255,255,0.08)" }} />
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{timeOpts.map(t => <button key={t} onClick={() => setTimeSpent(t)} style={{ padding: "6px 14px", borderRadius: 20, border: timeSpent === t ? "1px solid #6ba8ff" : "1px solid rgba(255,255,255,0.1)", background: timeSpent === t ? "rgba(107,168,255,0.15)" : "transparent", color: timeSpent === t ? "#7db4ff" : "rgba(255,255,255,0.4)", fontSize: 12, fontWeight: 600, cursor: "pointer", transition: "all 0.2s" }}>{t}</button>)}</div>
+              </div>
+              <button onClick={addEntry} disabled={!text.trim()} style={{ marginTop: 16, width: "100%", padding: "13px 0", background: text.trim() ? "linear-gradient(135deg, #ff6b4a, #e85d3a)" : "rgba(255,255,255,0.05)", border: "none", borderRadius: 10, color: text.trim() ? "#fff" : "rgba(255,255,255,0.2)", fontSize: 14, fontWeight: 600, cursor: text.trim() ? "pointer" : "default", transition: "all 0.25s" }}>+ 添加这个摩擦点</button>
+            </div>
+
+            {entries.length > 0 && <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {entries.map((e, i) => <FrictionEntry key={i} entry={e} index={i} onDelete={deleteEntry} />)}
+              <div style={{ marginTop: 20, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ fontSize: 13, color: "rgba(255,255,255,0.3)" }}>{entries.length} 个摩擦点{entries.length < 3 ? "（建议至少 3 个）" : ""}</span>
+                <button onClick={runAnalysis} style={{ padding: "13px 32px", background: "linear-gradient(135deg, #ff6b4a, #e85d3a)", border: "none", borderRadius: 10, color: "#fff", fontSize: 14, fontWeight: 600, cursor: "pointer", transition: "all 0.25s" }} onMouseOver={e => { e.target.style.boxShadow = "0 4px 20px rgba(255,107,74,0.3)"; }} onMouseOut={e => { e.target.style.boxShadow = "none"; }}>开始诊断分析 →</button>
+              </div>
+            </div>}
+
+            {entries.length === 0 && <div style={{ textAlign: "center", padding: "40px 20px", color: "rgba(255,255,255,0.2)" }}>
+              <div style={{ fontSize: 32, marginBottom: 12 }}>🔍</div>
+              <div style={{ fontSize: 14, lineHeight: 1.6 }}>想想最近一周，什么事让你反复花时间？<br />什么事让你心里想"要是有个XX就好了"？</div>
+            </div>}
+          </div>}
+
+          {phase === PHASES.ANALYZE && <div style={{ animation: "fadeIn 0.4s ease-out" }}>
+            {analyzing ? <div style={{ textAlign: "center", padding: "60px 20px" }}>
+              <div style={{ width: 48, height: 48, borderRadius: 14, background: "linear-gradient(135deg, #ff6b4a, #e85d3a)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, margin: "0 auto 20px", animation: "pulse 1.5s ease-in-out infinite" }}>⚡</div>
+              <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>正在分析你的摩擦点...</div>
+              <div style={{ fontSize: 13, color: "rgba(255,255,255,0.35)" }}>AI 正在诊断问题根因并生成解决方案</div>
+            </div> : <div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+                <h2 style={{ fontSize: 18, fontWeight: 700, margin: 0, fontFamily: "'Source Serif 4', Georgia, serif" }}>诊断结果</h2>
+                <button onClick={() => setPhase(PHASES.CAPTURE)} style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, color: "rgba(255,255,255,0.5)", fontSize: 12, fontWeight: 600, padding: "6px 14px", cursor: "pointer" }} onMouseOver={e => e.target.style.color = "#e8e4df"} onMouseOut={e => e.target.style.color = "rgba(255,255,255,0.5)"}>← 返回修改</button>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>{analysisResults.map((item, i) => <AnalysisCard key={i} item={item} index={i} onBuild={startBuild} />)}</div>
+            </div>}
+          </div>}
+
+          {phase === PHASES.BUILD && buildItem && <div style={{ animation: "fadeIn 0.4s ease-out", display: "flex", flexDirection: "column", height: "calc(100vh - 240px)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", color: "#ff8f6b", marginBottom: 4 }}>正在构建</div>
+                <h2 style={{ fontSize: 18, fontWeight: 700, margin: 0, fontFamily: "'Source Serif 4', Georgia, serif" }}>{buildItem.title}</h2>
+              </div>
+              <button onClick={() => setPhase(PHASES.ANALYZE)} style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, color: "rgba(255,255,255,0.5)", fontSize: 12, fontWeight: 600, padding: "6px 14px", cursor: "pointer" }} onMouseOver={e => e.target.style.color = "#e8e4df"} onMouseOut={e => e.target.style.color = "rgba(255,255,255,0.5)"}>← 返回诊断</button>
+            </div>
+            <div style={{ flex: 1, overflowY: "auto", padding: "8px 0", marginBottom: 12 }}>
+              {chatMessages.map((m, i) => <ChatMessage key={i} msg={m} />)}
+              {chatLoading && <div style={{ padding: "0 4px" }}><TypingDots /></div>}
+              <div ref={chatEndRef} />
+            </div>
+            <div style={{ display: "flex", gap: 10, padding: "12px 0", borderTop: "1px solid rgba(255,255,255,0.06)" }}>
+              <input value={chatInput} onChange={e => setChatInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } }} placeholder="描述你的具体场景，或者直接说'帮我做'..." style={{ flex: 1, padding: "14px 18px", background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, color: "#e8e4df", fontSize: 14, fontFamily: "'Source Serif 4', Georgia, serif" }} onFocus={e => e.target.style.borderColor = "rgba(255,107,74,0.4)"} onBlur={e => e.target.style.borderColor = "rgba(255,255,255,0.1)"} />
+              <button onClick={sendChat} disabled={!chatInput.trim() || chatLoading} style={{ padding: "14px 20px", background: chatInput.trim() && !chatLoading ? "linear-gradient(135deg, #ff6b4a, #e85d3a)" : "rgba(255,255,255,0.05)", border: "none", borderRadius: 12, color: chatInput.trim() && !chatLoading ? "#fff" : "rgba(255,255,255,0.2)", fontSize: 14, fontWeight: 600, cursor: chatInput.trim() && !chatLoading ? "pointer" : "default", flexShrink: 0 }}>发送</button>
+            </div>
+          </div>}
+        </div>
+      </div>);
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
